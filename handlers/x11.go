@@ -5,6 +5,7 @@ package handlers
 
 /*
 #cgo pkg-config: x11 xfixes
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -20,18 +21,25 @@ static Atom XA_CLIPBOARD;
 static Atom XA_UTF8_STRING;
 static long last_serial = -1;
 static int xfixes_event_base = 0;
+static const char *init_error = NULL;
 
-// Initialize X11 resources once
+// Initialize X11 resources once. On failure, stores a reason in init_error
+// and does not retry — X11 unavailability is treated as permanent.
 static void init_x11() {
     if (dpy != NULL) return;
+    if (init_error != NULL) return; // already failed, don't retry
 
     dpy = XOpenDisplay(NULL);
-    if (!dpy) return;
+    if (!dpy) {
+        init_error = "XOpenDisplay failed: DISPLAY not set or X server not running";
+        return;
+    }
 
     int xfixes_error_base;
     if (!XFixesQueryExtension(dpy, &xfixes_event_base, &xfixes_error_base)) {
         XCloseDisplay(dpy);
         dpy = NULL;
+        init_error = "XFixesQueryExtension failed: XFixes extension not available on this X server";
         return;
     }
 
@@ -44,6 +52,10 @@ static void init_x11() {
 
     // Flush to ensure the request is sent
     XFlush(dpy);
+}
+
+const char* getX11InitError() {
+    return init_error;
 }
 
 // Returns the X11 connection file descriptor for select/poll
@@ -81,11 +93,11 @@ int hasClipboardChangedX11() {
     return changed;
 }
 
-// Blocking wait for clipboard change (with timeout in milliseconds)
-// Returns 1 if changed, 0 if timeout, -1 on error
+// Blocking wait for clipboard change (with timeout in milliseconds).
+// Returns: 1 if changed, 0 on timeout, -1 if select() failed, -2 if X11 init failed.
 int waitForClipboardChange(int timeout_ms) {
     init_x11();
-    if (!dpy) return -1;
+    if (!dpy) return -2;
 
     int fd = ConnectionNumber(dpy);
     fd_set fds;
@@ -94,15 +106,18 @@ int waitForClipboardChange(int timeout_ms) {
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
 
-    FD_ZERO(&fds);
-    FD_SET(fd, &fds);
+    int ret;
+    do {
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
+        ret = select(fd + 1, &fds, NULL, NULL, &tv);
+    } while (ret == -1 && errno == EINTR); // restart on signal interruption
 
-    int ret = select(fd + 1, &fds, NULL, NULL, &tv);
     if (ret > 0) {
         return hasClipboardChangedX11();
     }
 
-    return ret; // 0 = timeout, -1 = error
+    return ret; // 0 = timeout, -1 = select() error
 }
 
 // Returns clipboard text (UTF-8) or NULL
@@ -357,14 +372,14 @@ func X11ClipboardChanged() bool {
 	return C.hasClipboardChangedX11() != 0
 }
 
-// Efficient listener using blocking waits
+// RunX11Listener blocks, monitoring the X11 clipboard for changes and saving new
+// entries to history. It uses select(2) on the X11 connection fd for efficient
+// blocking rather than polling.
 func RunX11Listener() {
 	for {
-		// Wait up to 1 second for clipboard change
 		result := int(C.waitForClipboardChange(1000))
 
 		if result > 0 {
-			// Clipboard changed
 			imgContents, err := GetClipboardImage()
 			if err != nil {
 				utils.LogERROR(fmt.Sprintf("Error getting clipboard image: %v\n", err))
@@ -374,7 +389,6 @@ func RunX11Listener() {
 				utils.HandleError(SaveImage(imgContents))
 			}
 
-			// Check if the clipboard content should be excluded based on source application
 			activeWindow := shell.X11ActiveWindowTitle()
 			if isAppExcluded(activeWindow, config.ClipseConfig.ExcludedApps) {
 				utils.LogINFO(fmt.Sprintf("Skipping clipboard content from excluded app: %s", activeWindow))
@@ -385,13 +399,18 @@ func RunX11Listener() {
 			if textContents != "" {
 				utils.HandleError(SaveText(textContents))
 			}
-		}
-		if result == 0 {
+		} else if result == 0 {
 			continue // Timeout - no change, this is normal
+		} else if result == -2 {
+			// X11 init failed permanently (e.g. DISPLAY not set). Nothing to retry.
+			reason := C.GoString(C.getX11InitError())
+			utils.LogERROR(fmt.Sprintf("X11 initialisation failed: %s", reason))
+			return
+		} else {
+			// Transient select(2) error — log and retry after a short back-off.
+			utils.LogERROR("error waiting for clipboard change: select() failed")
+			time.Sleep(1 * time.Second)
 		}
-
-		utils.LogERROR("error waiting for clipboard change")
-		time.Sleep(1 * time.Second)
 	}
 }
 
