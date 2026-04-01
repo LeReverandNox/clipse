@@ -160,40 +160,73 @@ char* getClipboardTextX11() {
     return out;
 }
 
+// Returns true if the atom 'needle' is present in an array of atoms 'haystack'.
+static Bool atomInList(Atom needle, Atom *haystack, int n) {
+    for (int i = 0; i < n; i++) {
+        if (haystack[i] == needle) return True;
+    }
+    return False;
+}
+
 unsigned char* getClipboardImageX11(int *out_len) {
     init_x11();
     if (!dpy) return NULL;
 
     *out_len = 0;
 
-    Atom sel = XA_CLIPBOARD;
+    Atom sel     = XA_CLIPBOARD;
+    Atom TARGETS = XInternAtom(dpy, "TARGETS", False);
+    Atom PNG     = XInternAtom(dpy, "image/png",  False);
+    Atom JPEG    = XInternAtom(dpy, "image/jpeg", False);
 
-    // preferred MIME targets (BMP removed)
-    Atom PNG  = XInternAtom(dpy, "image/png", False);
-    Atom JPEG = XInternAtom(dpy, "image/jpeg", False);
+    // Query TARGETS first so we only request formats the owner actually supports.
+    // This prevents terminals (e.g. Alacritty) that advertise image/png for their
+    // selection screenshots from being mistakenly treated as image copies.
+    XConvertSelection(dpy, sel, TARGETS, TARGETS, win, CurrentTime);
+    XFlush(dpy);
 
-    Atom targets[] = { PNG, JPEG };
-    const int ntargets = sizeof(targets) / sizeof(targets[0]);
+    XEvent ev;
+    XIfEvent(dpy, &ev, isSelectionNotify, NULL);
+
+    if (ev.xselection.property == None) return NULL;
+
+    Atom   type;
+    int    format;
+    unsigned long len, bytes_left;
+    unsigned char *tdata = NULL;
+
+    if (XGetWindowProperty(dpy, win, TARGETS, 0, ~0, False,
+                           XA_ATOM, &type, &format,
+                           &len, &bytes_left, &tdata) != Success || !tdata) {
+        if (tdata) XFree(tdata);
+        return NULL;
+    }
+
+    Atom *supported = (Atom *)tdata;
+    int nsupported  = (int)len;
+
+    Bool hasPNG  = atomInList(PNG,  supported, nsupported);
+    Bool hasJPEG = atomInList(JPEG, supported, nsupported);
+    XFree(tdata);
+
+    if (!hasPNG && !hasJPEG) return NULL;
+
+    Atom image_targets[] = { PNG, JPEG };
+    const int ntargets = 2;
 
     for (int i = 0; i < ntargets; i++) {
-        Atom target = targets[i];
+        Atom target = image_targets[i];
+        if (target == PNG  && !hasPNG)  continue;
+        if (target == JPEG && !hasJPEG) continue;
 
-        // Ask clipboard owner to convert to requested type
         XConvertSelection(dpy, sel, target, target, win, CurrentTime);
         XFlush(dpy);
 
-        // Wait for the SelectionNotify event, leaving XFixes events in the queue
-        XEvent ev;
         XIfEvent(dpy, &ev, isSelectionNotify, NULL);
 
-        if (ev.xselection.property == None)
-            continue;
+        if (ev.xselection.property == None) continue;
 
-        Atom type;
-        int format;
-        unsigned long len, bytes_left;
         unsigned char *data = NULL;
-
         if (XGetWindowProperty(dpy, win, target, 0, ~0, False,
                                AnyPropertyType, &type, &format,
                                &len, &bytes_left, &data) != Success) {
@@ -205,11 +238,7 @@ unsigned char* getClipboardImageX11(int *out_len) {
             continue;
         }
 
-        // XGetWindowProperty returns len in terms of format units, not bytes
-        // format is in bits (8, 16, or 32), so calculate actual byte length
         int actual_len = len * (format / 8);
-
-        // Copy result to malloc'd buffer (Go will free this)
         unsigned char *copy = malloc(actual_len);
         memcpy(copy, data, actual_len);
         XFree(data);
@@ -218,7 +247,7 @@ unsigned char* getClipboardImageX11(int *out_len) {
         return copy;
     }
 
-    return NULL; // neither PNG nor JPEG available
+    return NULL;
 }
 
 // Clipboard data holder
