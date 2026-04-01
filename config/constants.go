@@ -15,8 +15,9 @@ const (
 	defaultEnableAutoPaste   = false
 	defaultAutoPasteKeyBind  = "ctrl+v"
 	defaultAutoPasteBuffer   = 10
-	defaultEnableMouse       = true
-	defaultEnableDescription = true
+	defaultEnableMouse           = true
+	defaultEnableDescription     = true
+	defaultSyncPrimarySelection  = false
 )
 
 // Initialize default key bindings
@@ -72,8 +73,9 @@ func defaultConfig() Config {
 		ThemeFilePath:     defaultThemeFile,
 		KeyBindings:       defaultKeyBindings(),
 		ExcludedApps:      defaultExcludedApps(),
-		EnableMouse:       defaultEnableMouse,
-		EnableDescription: defaultEnableDescription,
+		EnableMouse:          defaultEnableMouse,
+		EnableDescription:    defaultEnableDescription,
+		SyncPrimarySelection: defaultSyncPrimarySelection,
 		ImageDisplay: ImageDisplay{
 			Type:      "basic",
 			ScaleX:    9,

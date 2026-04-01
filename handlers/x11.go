@@ -503,7 +503,12 @@ func RunX11ClipboardServer(text string) {
 	cstr := C.CString(text)
 	defer C.free(unsafe.Pointer(cstr))
 
-	if C.setClipboardTextX11(cstr, C.int(0)) == 0 {
+	syncPrimary := C.int(0)
+	if config.ClipseConfig.SyncPrimarySelection {
+		syncPrimary = C.int(1)
+	}
+
+	if C.setClipboardTextX11(cstr, syncPrimary) == 0 {
 		utils.LogERROR("clipboard server: failed to take X11 clipboard ownership")
 		return
 	}
