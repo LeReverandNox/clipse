@@ -426,37 +426,40 @@ func RunX11Listener() {
 	for {
 		result := int(C.waitForClipboardChange(1000))
 
-		if result > 0 {
+		switch {
+		case result > 0:
 			imgContents, err := GetClipboardImage()
 			if err != nil {
-				utils.LogERROR(fmt.Sprintf("Error getting clipboard image: %v\n", err))
+				utils.LogERROR(fmt.Sprintf("error getting clipboard image: %v", err))
 			}
-
 			if imgContents != nil {
 				utils.HandleError(SaveImage(imgContents))
 			}
 
 			activeWindow := shell.X11ActiveWindowTitle()
 			if isAppExcluded(activeWindow, config.ClipseConfig.ExcludedApps) {
-				utils.LogINFO(fmt.Sprintf("Skipping clipboard content from excluded app: %s", activeWindow))
-				return
+				utils.LogINFO(fmt.Sprintf("skipping clipboard content from excluded app: %s", activeWindow))
+				continue
 			}
 
 			textContents := X11GetClipboardText()
 			if textContents != "" {
 				utils.HandleError(SaveText(textContents))
 			}
-		} else if result == 0 {
-			continue // Timeout - no change, this is normal
-		} else if result == -2 {
+
+		case result == 0:
+			// Timeout — no clipboard change, loop normally.
+
+		case result == -2:
 			// X11 init failed permanently (e.g. DISPLAY not set). Nothing to retry.
 			reason := C.GoString(C.getX11InitError())
 			utils.LogERROR(fmt.Sprintf("X11 initialisation failed: %s", reason))
 			return
-		} else {
+
+		default:
 			// Transient select(2) error — log and retry after a short back-off.
 			utils.LogERROR("error waiting for clipboard change: select() failed")
-			time.Sleep(1 * time.Second)
+			time.Sleep(time.Second)
 		}
 	}
 }
