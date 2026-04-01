@@ -120,6 +120,13 @@ int waitForClipboardChange(int timeout_ms) {
     return ret; // 0 = timeout, -1 = select() error
 }
 
+// Predicate for XIfEvent: only match true X11 SelectionNotify (type 31),
+// leaving XFixes and other events in the queue for the listener loop.
+static Bool isSelectionNotify(Display *d, XEvent *ev, XPointer arg) {
+    (void)d; (void)arg;
+    return ev->type == SelectionNotify;
+}
+
 // Returns clipboard text (UTF-8) or NULL
 char* getClipboardTextX11() {
     init_x11();
@@ -132,7 +139,7 @@ char* getClipboardTextX11() {
     XFlush(dpy);
 
     XEvent ev;
-    XNextEvent(dpy, &ev);
+    XIfEvent(dpy, &ev, isSelectionNotify, NULL);
 
     if (ev.type != SelectionNotify) return NULL;
     if (ev.xselection.property == None) return NULL;
@@ -175,12 +182,9 @@ unsigned char* getClipboardImageX11(int *out_len) {
         XConvertSelection(dpy, sel, target, target, win, CurrentTime);
         XFlush(dpy);
 
-        // Wait for the SelectionNotify event
+        // Wait for the SelectionNotify event, leaving XFixes events in the queue
         XEvent ev;
-        XNextEvent(dpy, &ev);
-
-        if (ev.type != SelectionNotify)
-            continue;
+        XIfEvent(dpy, &ev, isSelectionNotify, NULL);
 
         if (ev.xselection.property == None)
             continue;
