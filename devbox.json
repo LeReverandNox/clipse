@@ -1,0 +1,27 @@
+{
+  "$schema":  "https://raw.githubusercontent.com/jetify-com/devbox/0.17.0/.schema/devbox.schema.json",
+  "packages": [
+    "go@latest",
+    "gcc",
+    "pkg-config",
+    "libx11",
+    "libxfixes",
+    "libxtst",
+    "libxi",
+    "libxinerama",
+    "libxrandr",
+    "libxcursor",
+    "libxkbcommon",
+    "xorgproto"
+  ],
+  "shell": {
+    "init_hook": [
+      "echo 'Welcome to devbox!' > /dev/null"
+    ],
+    "scripts": {
+      "test": [
+        "echo \"Error: no test specified\" && exit 1"
+      ]
+    }
+  }
+}
