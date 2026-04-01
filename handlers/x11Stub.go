@@ -24,3 +24,4 @@ func GetClipboardImage() ([]byte, error) { return []byte{}, errX11Unsupported }
 func X11Paste()                          {}
 func X11SetClipboardText(_ string)       {}
 func X11SetClipboardImage(string)        {}
+func RunX11ClipboardServer(_ string)     {}

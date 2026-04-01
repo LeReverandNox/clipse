@@ -3,6 +3,7 @@ package cmd
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -36,8 +37,9 @@ var (
 	wlStore       = flag.Bool("wl-store", false, "Store data from the stdin directly using the wl-clipboard API.")
 	realTime      = flag.Bool("enable-real-time", false, "Enable real time updates to the TUI")
 	outputAll     = flag.String("output-all", "", "Print clipboard text content to stdout, each entry separated by a newline, possible values: (raw, unescaped)")
-	autoPaste     = flag.Bool("auto-paste", false, "send key event to paste")
-	pause         = flag.String("pause", "", "Pause clipboard monitoring for a specified duration. Example: `clipse -pause 5m` pauses for 5 minutes.")
+	autoPaste         = flag.Bool("auto-paste", false, "send key event to paste")
+	pause             = flag.String("pause", "", "Pause clipboard monitoring for a specified duration. Example: `clipse -pause 5m` pauses for 5 minutes.")
+	serveX11Clipboard = flag.Bool("serve-x11-clipboard", false, "[internal] Serve X11 clipboard ownership, reading content from stdin. Not intended for direct use.")
 )
 
 func Main() int {
@@ -112,6 +114,14 @@ func Main() int {
 
 	case *autoPaste:
 		handleAutoPaste()
+
+	case *serveX11Clipboard:
+		text, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			utils.LogERROR(fmt.Sprintf("clipboard server: failed to read stdin: %v", err))
+			return 1
+		}
+		handlers.RunX11ClipboardServer(string(text))
 
 	default:
 		fmt.Printf("Command not recognized. See %s --help for usage instructions.", os.Args[0])

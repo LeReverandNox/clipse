@@ -290,81 +290,92 @@ static Bool handleSelectionRequest(XEvent *ev) {
     return True;
 }
 
-// Set text to clipboard
-int setClipboardTextX11(const char *text) {
+// Set text to clipboard and take ownership. Call serveClipboardUntilLost() afterwards
+// to keep serving clipboard requests indefinitely in a dedicated process.
+// If sync_primary is non-zero, also take ownership of the PRIMARY selection so
+// middle-click paste returns the same content.
+int setClipboardTextX11(const char *text, int sync_primary) {
     init_x11();
     if (!dpy || !text) return 0;
 
-    // Free old data
     if (clipboard_data) {
         free(clipboard_data);
         clipboard_data = NULL;
     }
 
-    // Copy text data
     clipboard_data_len = strlen(text);
     clipboard_data = malloc(clipboard_data_len);
     memcpy(clipboard_data, text, clipboard_data_len);
     clipboard_data_type = XA_UTF8_STRING;
 
-    // Take ownership of clipboard
     XSetSelectionOwner(dpy, XA_CLIPBOARD, win, CurrentTime);
     XFlush(dpy);
 
-    // Verify we own it
     if (XGetSelectionOwner(dpy, XA_CLIPBOARD) != win) {
         free(clipboard_data);
         clipboard_data = NULL;
         return 0;
     }
 
-    // Process selection requests for a bit to let other apps grab the data
-    // This is a simple approach - a proper implementation would do this in the background
-    time_t start = time(NULL);
-    while (time(NULL) - start < 1) {
-        while (XPending(dpy)) {
-            XEvent ev;
-            XNextEvent(dpy, &ev);
-            if (ev.type == SelectionRequest) {
-                handleSelectionRequest(&ev);
-            }
-        }
-        usleep(10000); // 10ms
+    if (sync_primary) {
+        XSetSelectionOwner(dpy, XA_PRIMARY, win, CurrentTime);
+        XFlush(dpy);
     }
 
     return 1;
 }
-// Set image to clipboard
+
+// Block serving clipboard SelectionRequests until CLIPBOARD ownership is lost
+// (SelectionClear for XA_CLIPBOARD received). SelectionClear for XA_PRIMARY is
+// ignored — it just means the user highlighted text somewhere else, which is fine.
+// Meant to be called from a dedicated long-lived subprocess immediately after
+// setClipboardTextX11.
+void serveClipboardUntilLost() {
+    if (!dpy) return;
+    XEvent ev;
+    for (;;) {
+        XNextEvent(dpy, &ev);
+        if (ev.type == SelectionRequest) {
+            handleSelectionRequest(&ev);
+        } else if (ev.type == SelectionClear) {
+            if (ev.xselectionclear.selection == XA_CLIPBOARD) {
+                if (clipboard_data) {
+                    free(clipboard_data);
+                    clipboard_data = NULL;
+                }
+                return;
+            }
+            // SelectionClear for PRIMARY: user selected text elsewhere — keep serving CLIPBOARD.
+        }
+    }
+}
+
+// setClipboardImageX11 sets image data on the clipboard and serves SelectionRequests
+// for ~1 second, which is sufficient for most immediate paste operations.
+// Unlike text, image clipboard ownership is not delegated to a long-lived subprocess.
 int setClipboardImageX11(unsigned char *data, int len, const char *mime_type) {
     init_x11();
     if (!dpy || !data || len <= 0) return 0;
 
-    // Free old data
     if (clipboard_data) {
         free(clipboard_data);
         clipboard_data = NULL;
     }
 
-    // Copy image data
     clipboard_data_len = len;
     clipboard_data = malloc(len);
     memcpy(clipboard_data, data, len);
-
-    // Set the MIME type atom
     clipboard_data_type = XInternAtom(dpy, mime_type, False);
 
-    // Take ownership of clipboard
     XSetSelectionOwner(dpy, XA_CLIPBOARD, win, CurrentTime);
     XFlush(dpy);
 
-    // Verify we own it
     if (XGetSelectionOwner(dpy, XA_CLIPBOARD) != win) {
         free(clipboard_data);
         clipboard_data = NULL;
         return 0;
     }
 
-    // Process selection requests for a bit
     time_t start = time(NULL);
     while (time(NULL) - start < 1) {
         while (XPending(dpy)) {
@@ -374,7 +385,7 @@ int setClipboardImageX11(unsigned char *data, int len, const char *mime_type) {
                 handleSelectionRequest(&ev);
             }
         }
-        usleep(10000); // 10ms
+        usleep(10000);
     }
 
     return 1;
@@ -384,6 +395,9 @@ import "C"
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"strings"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -462,12 +476,35 @@ func GetClipboardImage() ([]byte, error) {
 }
 
 func X11SetClipboardText(text string) {
+	exe, err := os.Executable()
+	if err != nil {
+		utils.LogERROR(fmt.Sprintf("clipboard server: failed to find own executable: %v", err))
+		return
+	}
+	cmd := exec.Command(exe, "--serve-x11-clipboard")
+	cmd.Stdin = strings.NewReader(text)
+	// Detach subprocess from terminal so it survives the parent process exiting.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		utils.LogERROR(fmt.Sprintf("clipboard server: failed to launch subprocess: %v", err))
+		return
+	}
+	_ = cmd.Process.Release()
+}
+
+// RunX11ClipboardServer takes X11 clipboard ownership for the given text and blocks
+// serving SelectionRequest events until another application takes ownership
+// (SelectionClear). It is intended to run in a dedicated subprocess launched by
+// X11SetClipboardText.
+func RunX11ClipboardServer(text string) {
 	cstr := C.CString(text)
 	defer C.free(unsafe.Pointer(cstr))
 
-	if C.setClipboardTextX11(cstr) == 0 {
-		utils.HandleError(fmt.Errorf("failed to set clipboard text"))
+	if C.setClipboardTextX11(cstr, C.int(0)) == 0 {
+		utils.LogERROR("clipboard server: failed to take X11 clipboard ownership")
+		return
 	}
+	C.serveClipboardUntilLost()
 }
 
 func X11Paste() {
