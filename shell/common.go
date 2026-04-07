@@ -87,7 +87,7 @@ func KillExistingFG() {
 		if strings.Contains(pidCmd, listenShellCmd) ||
 			strings.Contains(pidCmd, wlStoreCmd) ||
 			strings.Contains(pidCmd, darwinListenCmd) ||
-			strings.Contains(pidCmd, x11ListenCmd) {
+			strings.Contains(pidCmd, "-listen-x11") { // match both -listen-x11 and --listen-x11
 			continue
 		}
 
