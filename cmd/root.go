@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -39,7 +40,8 @@ var (
 	outputAll     = flag.String("output-all", "", "Print clipboard text content to stdout, each entry separated by a newline, possible values: (raw, unescaped)")
 	autoPaste         = flag.Bool("auto-paste", false, "send key event to paste")
 	pause             = flag.String("pause", "", "Pause clipboard monitoring for a specified duration. Example: `clipse -pause 5m` pauses for 5 minutes.")
-	serveX11Clipboard = flag.Bool("serve-x11-clipboard", false, "[internal] Serve X11 clipboard ownership, reading content from stdin. Not intended for direct use.")
+	serveX11Clipboard      = flag.Bool("serve-x11-clipboard", false, "[internal] Serve X11 clipboard ownership, reading content from stdin. Not intended for direct use.")
+	serveX11ClipboardImage = flag.Bool("serve-x11-clipboard-image", false, "[internal] Serve X11 clipboard ownership for an image, reading file path from stdin. Not intended for direct use.")
 )
 
 func Main() int {
@@ -122,6 +124,13 @@ func Main() int {
 			return 1
 		}
 		handlers.RunX11ClipboardServer(string(text))
+
+	case *serveX11ClipboardImage:
+		if flag.NArg() < 1 {
+			utils.LogERROR("clipboard image server: no file path provided")
+			return 1
+		}
+		handlers.RunX11ClipboardImageServer(flag.Arg(0))
 
 	default:
 		fmt.Printf("Command not recognized. See %s --help for usage instructions.", os.Args[0])
@@ -234,14 +243,29 @@ func handleClean() {
 }
 
 func handleCopy() {
-	var input string
 	switch {
-	case len(os.Args) < 3:
-		input = utils.GetStdin()
+	case len(os.Args) >= 3:
+		arg := os.Args[2]
+		if isImageFilePath(arg) {
+			display.DisplayServer.CopyImage(arg)
+			return
+		}
+		display.DisplayServer.CopyText(arg)
 	default:
-		input = os.Args[2]
+		display.DisplayServer.CopyText(utils.GetStdin())
 	}
-	display.DisplayServer.CopyText(input)
+}
+
+func isImageFilePath(s string) bool {
+	lower := strings.ToLower(s)
+	for _, ext := range []string{".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"} {
+		if strings.HasSuffix(lower, ext) {
+			if _, err := os.Stat(s); err == nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func handleOutputAll(format string) {

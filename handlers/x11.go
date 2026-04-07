@@ -350,9 +350,9 @@ void serveClipboardUntilLost() {
     }
 }
 
-// setClipboardImageX11 sets image data on the clipboard and serves SelectionRequests
-// for ~1 second, which is sufficient for most immediate paste operations.
-// Unlike text, image clipboard ownership is not delegated to a long-lived subprocess.
+// setClipboardImageX11 takes ownership of the X11 CLIPBOARD selection with the given
+// image data. Call serveClipboardUntilLost() afterwards in a dedicated long-lived
+// subprocess to keep serving SelectionRequests indefinitely.
 int setClipboardImageX11(unsigned char *data, int len, const char *mime_type) {
     init_x11();
     if (!dpy || !data || len <= 0) return 0;
@@ -376,27 +376,15 @@ int setClipboardImageX11(unsigned char *data, int len, const char *mime_type) {
         return 0;
     }
 
-    time_t start = time(NULL);
-    while (time(NULL) - start < 1) {
-        while (XPending(dpy)) {
-            XEvent ev;
-            XNextEvent(dpy, &ev);
-            if (ev.type == SelectionRequest) {
-                handleSelectionRequest(&ev);
-            }
-        }
-        usleep(10000);
-    }
-
     return 1;
 }
 */
 import "C"
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
-	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -485,13 +473,24 @@ func X11SetClipboardText(text string) {
 		return
 	}
 	cmd := exec.Command(exe, "--serve-x11-clipboard")
-	cmd.Stdin = strings.NewReader(text)
+	// Use StdinPipe and write synchronously so the data is guaranteed to be in
+	// the pipe buffer before this process exits (avoids a race with cmd.Stdin +
+	// internal goroutine when the parent is a short-lived process like clipse -c).
+	pw, err := cmd.StdinPipe()
+	if err != nil {
+		utils.LogERROR(fmt.Sprintf("clipboard server: failed to create stdin pipe: %v", err))
+		return
+	}
 	// Detach subprocess from terminal so it survives the parent process exiting.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		utils.LogERROR(fmt.Sprintf("clipboard server: failed to launch subprocess: %v", err))
 		return
 	}
+	if _, err := io.WriteString(pw, text); err != nil {
+		utils.LogERROR(fmt.Sprintf("clipboard server: failed to write text to pipe: %v", err))
+	}
+	pw.Close()
 	_ = cmd.Process.Release()
 }
 
@@ -530,21 +529,44 @@ func X11Paste() {
 }
 
 func X11SetClipboardImage(filePath string) {
+	exe, err := os.Executable()
+	if err != nil {
+		utils.LogERROR(fmt.Sprintf("clipboard image server: failed to find own executable: %v", err))
+		return
+	}
+	cmd := exec.Command(exe, "--serve-x11-clipboard-image", filePath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		utils.LogERROR(fmt.Sprintf("clipboard image server: failed to launch subprocess: %v", err))
+		return
+	}
+	_ = cmd.Process.Release()
+}
+
+// RunX11ClipboardImageServer takes X11 clipboard ownership for the given image file
+// and blocks serving SelectionRequest events until another application takes ownership
+// (SelectionClear). It is intended to run in a dedicated subprocess launched by
+// X11SetClipboardImage.
+func RunX11ClipboardImageServer(filePath string) {
 	imgData, err := os.ReadFile(filePath)
-	utils.HandleError(err)
+	if err != nil {
+		utils.LogERROR(fmt.Sprintf("clipboard image server: failed to read image: %v", err))
+		return
+	}
 	if len(imgData) == 0 {
-		utils.LogWARN(fmt.Sprintf("empty image data"))
+		utils.LogWARN("clipboard image server: empty image data")
 		return
 	}
 
 	cmime := C.CString("image/png")
 	defer C.free(unsafe.Pointer(cmime))
 
-	// Use C.CBytes to properly copy the data
 	cdata := C.CBytes(imgData)
 	defer C.free(cdata)
 
 	if C.setClipboardImageX11((*C.uchar)(cdata), C.int(len(imgData)), cmime) == 0 {
-		utils.LogERROR(fmt.Sprintf("failed to set clipboard image"))
+		utils.LogERROR("clipboard image server: failed to take X11 clipboard ownership")
+		return
 	}
+	C.serveClipboardUntilLost()
 }
